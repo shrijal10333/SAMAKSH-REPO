@@ -1,0 +1,6 @@
+{
+  "name": "Samaksh Movie",
+  "description": "Streaming entertainment hub with movies, TV shows, anime, manga reader, music player, and live watch party rooms.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

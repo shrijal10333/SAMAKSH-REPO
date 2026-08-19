@@ -1,0 +1,10 @@
+{
+    "buildCommand": "cd cineb && npm install && npm run build",
+    "outputDirectory": "cineb/dist",
+    "rewrites": [
+        {
+            "source": "/(.*)",
+            "destination": "/"
+        }
+    ]
+}
