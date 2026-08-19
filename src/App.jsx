@@ -3,6 +3,7 @@ import { BrowserRouter as Router, Routes, Route, useLocation } from 'react-route
 import Navbar from './components/Navbar';
 import Sidebar from './components/Sidebar';
 import MusicPlayer from './components/MusicPlayer';
+import ErrorBoundary from './components/ErrorBoundary';
 import { AuthProvider } from './context/AuthContext';
 import { MusicProvider } from './context/MusicContext';
 
@@ -45,7 +46,10 @@ function Layout({ children }) {
     // Check if the current route is an immersive full-screen view (like Reader or Watch)
     const isImmersive = location.pathname.startsWith('/manga/read') || 
                         location.pathname.startsWith('/manga/reader') || 
-                        location.pathname.startsWith('/watch');
+                        location.pathname.startsWith('/watch') ||
+                        location.pathname.startsWith('/movie/') ||
+                        location.pathname.startsWith('/tv/') ||
+                        location.pathname.startsWith('/anime/');
 
     return (
         <div className="min-h-screen bg-[#080808] text-white flex flex-col antialiased selection:bg-[#1db954] selection:text-black">
@@ -87,7 +91,9 @@ function Layout({ children }) {
             {/* Main Content Area */}
             <div className={`flex-1 flex flex-col ${!isImmersive ? 'md:pl-64 pt-16 md:pt-20' : ''}`}>
                 <main className="flex-1">
-                    {children}
+                    <ErrorBoundary>
+                        {children}
+                    </ErrorBoundary>
                 </main>
             </div>
 
@@ -99,60 +105,71 @@ function Layout({ children }) {
 
 export default function App() {
     return (
-        <AuthProvider>
-            <MusicProvider>
-                <Router>
-                    <Layout>
-                        <Routes>
-                            {/* Main Hub */}
-                            <Route path="/" element={<Home />} />
-                            
-                            {/* Video & Media */}
-                            <Route path="/movies" element={<Movies />} />
-                            <Route path="/tv" element={<TVShows />} />
-                            <Route path="/anime" element={<Anime />} />
-                            <Route path="/feed" element={<Feed />} />
-                            <Route path="/4k" element={<Premium4K />} />
-                            <Route path="/search" element={<Search />} />
-                            <Route path="/watch/:type/:id" element={<Watch />} />
-                            
-                            {/* Manga Engine */}
-                            <Route path="/manga" element={<Manga />} />
-                            <Route path="/manga/:id" element={<MangaDetails />} />
-                            <Route path="/manga/details/:id" element={<MangaDetails />} />
-                            <Route path="/manga/read/:id" element={<MangaReader />} />
-                            <Route path="/manga/read/:id/:chapterId" element={<MangaReader />} />
-                            <Route path="/manga/reader/:id/:chapterId" element={<MangaReader />} />
+        <ErrorBoundary>
+            <AuthProvider>
+                <MusicProvider>
+                    <Router>
+                        <Layout>
+                            <Routes>
+                                {/* Main Hub */}
+                                <Route path="/" element={<Home />} />
+                                
+                                {/* Video & Media Hub */}
+                                <Route path="/movies" element={<Movies />} />
+                                <Route path="/tv" element={<TVShows />} />
+                                <Route path="/anime" element={<Anime />} />
+                                <Route path="/feed" element={<Feed />} />
+                                <Route path="/4k" element={<Premium4K />} />
+                                <Route path="/search" element={<Search />} />
+                                
+                                {/* Stream & Watch Player Routes & Direct Aliases */}
+                                <Route path="/watch/:type/:id" element={<Watch />} />
+                                <Route path="/watch/:id" element={<Watch explicitType="movie" />} />
+                                <Route path="/movie/:id" element={<Watch explicitType="movie" />} />
+                                <Route path="/tv/:id" element={<Watch explicitType="tv" />} />
+                                <Route path="/anime/:id" element={<Watch explicitType="tv" />} />
+                                <Route path="/show/:id" element={<Watch explicitType="tv" />} />
+                                <Route path="/series/:id" element={<Watch explicitType="tv" />} />
+                                
+                                {/* Manga Engine */}
+                                <Route path="/manga" element={<Manga />} />
+                                <Route path="/manga/:id" element={<MangaDetails />} />
+                                <Route path="/manga/details/:id" element={<MangaDetails />} />
+                                <Route path="/manga/read/:id" element={<MangaReader />} />
+                                <Route path="/manga/read/:id/:chapterId" element={<MangaReader />} />
+                                <Route path="/manga/reader/:id/:chapterId" element={<MangaReader />} />
 
-                            {/* Music Hub */}
-                            <Route path="/music" element={<Music />} />
-                            <Route path="/nowplaying" element={<NowPlaying />} />
+                                {/* Music Hub */}
+                                <Route path="/music" element={<Music />} />
+                                <Route path="/music/:id" element={<Music />} />
+                                <Route path="/nowplaying" element={<NowPlaying />} />
 
-                            {/* Live & OTT */}
-                            <Route path="/channels" element={<Channels />} />
-                            <Route path="/ott" element={<OttHub />} />
-                            <Route path="/ott/:id" element={<OttPage />} />
-                            <Route path="/live/f1" element={<LiveF1 />} />
-                            <Route path="/live/cricket" element={<LiveCricket />} />
-                            <Route path="/live/esports" element={<LiveEsports />} />
+                                {/* Live & OTT */}
+                                <Route path="/channels" element={<Channels />} />
+                                <Route path="/ott" element={<OttHub />} />
+                                <Route path="/ott/:id" element={<OttPage />} />
+                                <Route path="/live/f1" element={<LiveF1 />} />
+                                <Route path="/live/cricket" element={<LiveCricket />} />
+                                <Route path="/live/esports" element={<LiveEsports />} />
 
-                            {/* Social & Party */}
-                            <Route path="/party" element={<WatchPartyLobby />} />
-                            <Route path="/party/:roomCode" element={<PartyRoomWaiting />} />
-                            <Route path="/party/room/:roomCode" element={<PartyRoomWaiting />} />
+                                {/* Social & Party */}
+                                <Route path="/party" element={<WatchPartyLobby />} />
+                                <Route path="/party/:roomCode" element={<PartyRoomWaiting />} />
+                                <Route path="/party/room/:roomCode" element={<PartyRoomWaiting />} />
 
-                            {/* User Profile & Library */}
-                            <Route path="/mylist" element={<MyList />} />
-                            <Route path="/history" element={<History />} />
-                            <Route path="/profile" element={<Profile />} />
-                            <Route path="/auth" element={<Auth />} />
+                                {/* User Profile & Library */}
+                                <Route path="/mylist" element={<MyList />} />
+                                <Route path="/history" element={<History />} />
+                                <Route path="/profile" element={<Profile />} />
+                                <Route path="/auth" element={<Auth />} />
 
-                            {/* Fallback route */}
-                            <Route path="*" element={<Home />} />
-                        </Routes>
-                    </Layout>
-                </Router>
-            </MusicProvider>
-        </AuthProvider>
+                                {/* Catch-All Fallback route */}
+                                <Route path="*" element={<Home />} />
+                            </Routes>
+                        </Layout>
+                    </Router>
+                </MusicProvider>
+            </AuthProvider>
+        </ErrorBoundary>
     );
 }

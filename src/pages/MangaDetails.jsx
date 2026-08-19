@@ -1,63 +1,72 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useCallback } from 'react';
 import { useParams, Link, useNavigate } from 'react-router-dom';
 import { fetchMangaDetails, fetchMangaChapters } from '../api';
-import { BookOpen, Star, Zap, Layers, ArrowRight, Search, RefreshCw, ExternalLink } from 'lucide-react';
+import { BookOpen, Star, Zap, Layers, ArrowRight, Search, RefreshCw, AlertCircle, Home, ArrowLeft } from 'lucide-react';
 
 export default function MangaDetails() {
     const { id } = useParams();
     const navigate = useNavigate();
     const [detail, setDetail] = useState(null);
-    const [loading, setLoading] = useState(true);
+    const [loadingState, setLoadingState] = useState('loading'); // 'loading' | 'success' | 'error' | 'empty'
+    const [errorMessage, setErrorMessage] = useState('');
     const [chapters, setChapters] = useState([]);
     const [fetchingChapters, setFetchingChapters] = useState(false);
     const [chapterSearch, setChapterSearch] = useState('');
     const [resolvedMdId, setResolvedMdId] = useState(null);
 
-    useEffect(() => {
-        window.scrollTo(0, 0);
-        let isMounted = true;
+    const loadManga = useCallback(async () => {
+        if (!id) {
+            setLoadingState('error');
+            setErrorMessage('Invalid manga ID provided.');
+            return;
+        }
 
-        const loadDetailsAndChapters = async () => {
-            if (!id) return;
-            setLoading(true);
-            try {
-                // 1. Fetch Manga specifications via dedicated proxy
-                const mangaData = await fetchMangaDetails(id);
+        setLoadingState('loading');
+        setErrorMessage('');
+        try {
+            window.scrollTo(0, 0);
+            const mangaData = await fetchMangaDetails(id);
 
-                if (!isMounted) return;
+            if (mangaData && (mangaData.id || mangaData.mal_id || mangaData.title)) {
                 setDetail(mangaData);
+                setLoadingState('success');
 
-                if (mangaData) {
-                    setFetchingChapters(true);
-                    const targetId = mangaData.mangadexId || mangaData.id || id;
-                    const targetTitle = mangaData.title_english || mangaData.title || '';
-                    
+                // Load chapters asynchronously
+                setFetchingChapters(true);
+                const targetId = mangaData.mangadexId || mangaData.mal_id || mangaData.id || id;
+                const targetTitle = mangaData.title_english || mangaData.title || '';
+                
+                try {
                     const feedRes = await fetchMangaChapters(targetId, targetTitle);
-                    if (isMounted && feedRes) {
-                        setChapters(feedRes.data || []);
+                    if (feedRes && Array.isArray(feedRes.data)) {
+                        setChapters(feedRes.data);
                         if (feedRes.mangadexId) {
                             setResolvedMdId(feedRes.mangadexId);
                         }
                     }
-                }
-            } catch (err) {
-                console.error('Failed to load manga details:', err);
-            } finally {
-                if (isMounted) {
-                    setLoading(false);
+                } catch (e) {
+                    console.warn('Chapters feed warning:', e);
+                } finally {
                     setFetchingChapters(false);
                 }
+            } else {
+                setDetail(null);
+                setLoadingState('empty');
+                setErrorMessage('The requested manga title could not be retrieved from the catalog.');
             }
-        };
-
-        loadDetailsAndChapters();
-
-        return () => {
-            isMounted = false;
-        };
+        } catch (err) {
+            console.error('Failed to load manga details:', err);
+            setDetail(null);
+            setLoadingState('error');
+            setErrorMessage(err.message || 'Unable to connect to the manga metadata proxy server.');
+        }
     }, [id]);
 
-    const filteredChapters = chapters.filter(ch => {
+    useEffect(() => {
+        loadManga();
+    }, [loadManga]);
+
+    const filteredChapters = (chapters || []).filter(ch => {
         if (!chapterSearch.trim()) return true;
         const query = chapterSearch.toLowerCase();
         const chNum = (ch.chapter || ch.attributes?.chapter || '').toString();
@@ -65,41 +74,62 @@ export default function MangaDetails() {
         return chNum.includes(query) || chTitle.includes(query);
     });
 
-    const firstChapter = chapters[0];
-    const latestChapter = chapters[chapters.length - 1];
+    const firstChapter = chapters?.[0];
+    const latestChapter = chapters?.[chapters.length - 1];
 
-    if (loading) {
+    if (loadingState === 'loading') {
         return (
-            <div className="min-h-screen bg-[#080808] flex flex-col items-center justify-center text-white space-y-4">
+            <div className="min-h-screen bg-[#080808] flex flex-col items-center justify-center text-white space-y-4 px-4">
                 <div className="w-12 h-12 border-4 border-[#1db954] border-t-transparent rounded-full animate-spin"></div>
                 <p className="text-white/60 font-black uppercase tracking-widest text-xs">Loading Manga Specifications...</p>
             </div>
         );
     }
 
-    if (!detail) {
+    if (loadingState === 'error' || loadingState === 'empty' || !detail) {
         return (
             <div className="min-h-screen bg-[#080808] flex flex-col items-center justify-center text-white p-8 text-center space-y-6">
-                <Layers size={64} className="text-white/20" />
-                <h1 className="text-2xl font-black uppercase tracking-tight">Manga Archive Not Found</h1>
-                <p className="text-white/40 text-sm max-w-md">The requested manga could not be retrieved from the catalog.</p>
-                <button 
-                    onClick={() => navigate('/manga')} 
-                    className="px-8 py-3 bg-[#1db954] text-black font-black uppercase text-xs tracking-widest rounded-2xl hover:scale-105 transition-transform"
-                >
-                    Back to Manga Catalog
-                </button>
+                <div className="max-w-md w-full bg-[#121212] border border-white/10 rounded-3xl p-8 shadow-2xl space-y-6">
+                    <div className="w-16 h-16 rounded-2xl bg-[#ff4d4d]/10 border border-[#ff4d4d]/20 flex items-center justify-center mx-auto text-[#ff4d4d]">
+                        <AlertCircle size={32} />
+                    </div>
+
+                    <div className="space-y-2">
+                        <span className="text-[10px] font-black uppercase tracking-[0.4em] text-[#ff4d4d]">
+                            SAMAKSH MANGA • ARCHIVE NOTICE
+                        </span>
+                        <h1 className="text-2xl font-black uppercase tracking-tight text-white">Manga Catalog Missing</h1>
+                        <p className="text-white/40 text-xs leading-relaxed">
+                            {errorMessage || "The requested manga title could not be retrieved from the catalog."}
+                        </p>
+                    </div>
+
+                    <div className="flex flex-col sm:flex-row gap-3 pt-2">
+                        <button 
+                            onClick={loadManga} 
+                            className="flex-1 px-6 py-3.5 bg-[#1db954] text-black font-black uppercase text-xs tracking-widest rounded-2xl hover:scale-105 transition-transform flex items-center justify-center gap-2"
+                        >
+                            <RefreshCw size={14} /> Retry
+                        </button>
+                        <button 
+                            onClick={() => navigate('/manga')} 
+                            className="flex-1 px-6 py-3.5 bg-white/10 hover:bg-white/20 text-white font-black uppercase text-xs tracking-widest rounded-2xl transition-all border border-white/10"
+                        >
+                            Catalog
+                        </button>
+                    </div>
+                </div>
             </div>
         );
     }
 
-    const coverUrl = detail.images?.jpg?.large_image_url || detail.images?.jpg?.image_url;
-    const readerId = resolvedMdId || detail.mangadexId || detail.id || id;
+    const coverUrl = detail.images?.jpg?.large_image_url || detail.images?.jpg?.image_url || detail.cover || 'https://placehold.co/400x600?text=No+Cover';
+    const readerId = resolvedMdId || detail.mangadexId || detail.mal_id || detail.id || id;
 
     return (
         <div className="min-h-screen bg-[#080808] text-white overflow-x-hidden relative selection:bg-[#1db954] selection:text-black pb-40">
             {/* Header Hero Canvas */}
-            <section className="relative min-h-[60vh] md:min-h-[70vh] w-full flex items-end pt-32 pb-16">
+            <section className="relative min-h-[60vh] md:min-h-[70vh] w-full flex items-end pt-24 md:pt-32 pb-16">
                 <div className="absolute inset-0 z-0">
                     <img 
                         src={coverUrl} 
