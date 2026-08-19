@@ -301,15 +301,69 @@ async function startServer() {
     }
   });
 
-  // ── Manga Engine Cache & Proxy ──────────────────────────────────────────────
-  const mangaCache: Record<string, { data: any; expiry: number }> = {};
-  const getCached = (key: string) => {
+  // ── Manga Engine Cache & Deduplicated Proxy Architecture ─────────────────────
+  interface CacheEntry {
+    data: any;
+    expiry: number;
+    staleUntil: number;
+  }
+  const mangaCache: Record<string, CacheEntry> = {};
+  const inFlightRequests = new Map<string, Promise<any>>();
+
+  const getCachedEntry = (key: string) => {
     const item = mangaCache[key];
-    if (item && item.expiry > Date.now()) return item.data;
-    return null;
+    if (!item) return null;
+    const isFresh = item.expiry > Date.now();
+    const isUsableStale = item.staleUntil > Date.now();
+    return { data: item.data, isFresh, isUsableStale };
   };
-  const setCached = (key: string, data: any, ttlSeconds = 300) => {
-    mangaCache[key] = { data, expiry: Date.now() + ttlSeconds * 1000 };
+
+  const setCachedEntry = (key: string, data: any, ttlSeconds = 600, staleGraceMultiplier = 4) => {
+    const now = Date.now();
+    mangaCache[key] = {
+      data,
+      expiry: now + ttlSeconds * 1000,
+      staleUntil: now + ttlSeconds * staleGraceMultiplier * 1000,
+    };
+  };
+
+  const deduplicate = <T>(key: string, fetcher: () => Promise<T>): Promise<T> => {
+    if (inFlightRequests.has(key)) {
+      return inFlightRequests.get(key) as Promise<T>;
+    }
+    const promise = (async () => {
+      try {
+        return await fetcher();
+      } finally {
+        inFlightRequests.delete(key);
+      }
+    })();
+    inFlightRequests.set(key, promise);
+    return promise;
+  };
+
+  const fetchWithRetry = async (url: string, options: any = {}, maxRetries = 2, baseDelay = 500) => {
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+      try {
+        const res = await fetch(url, options);
+        if (res.status === 429) {
+          const retryAfterSec = parseInt(res.headers.get('retry-after') || '2', 10);
+          console.warn(`Upstream 429 rate limit on ${url}. Backoff attempt ${attempt + 1}/${maxRetries}`);
+          if (attempt < maxRetries) {
+            await new Promise((r) => setTimeout(r, Math.max(retryAfterSec * 1000, baseDelay * (attempt + 1))));
+            continue;
+          }
+        }
+        return res;
+      } catch (err) {
+        if (attempt < maxRetries) {
+          await new Promise((r) => setTimeout(r, baseDelay * (attempt + 1)));
+          continue;
+        }
+        throw err;
+      }
+    }
+    throw new Error(`Exhausted retries for ${url}`);
   };
 
   // Helper: Normalize MangaDex manga entity into standard app schema
@@ -324,7 +378,6 @@ async function startServer() {
     const mainTitle = titleObj.en || titleObj['ja-ro'] || Object.values(titleObj)[0] || 'Unknown Manga';
     
     // Alt / Japanese titles
-    const altTitles = (m.attributes?.altTitles || []).map((t: any) => Object.values(t)[0]).filter(Boolean);
     const engAlt = m.attributes?.altTitles?.find((t: any) => t.en)?.en || mainTitle;
     const japAlt = m.attributes?.altTitles?.find((t: any) => t.ja || t['ja-ro']) || {};
     const japTitle = Object.values(japAlt)[0] || '';
@@ -374,113 +427,154 @@ async function startServer() {
     if (!title || !title.trim()) return null;
     const cleanTitle = title.replace(/\((Manga|TV|Light Novel|Movie|Manhwa|Manhua)\)/gi, '').trim();
     const cacheKey = `md_resolve_${cleanTitle.toLowerCase()}`;
-    const cached = getCached(cacheKey);
-    if (cached) return cached;
+    const cached = getCachedEntry(cacheKey);
+    if (cached && (cached.isFresh || cached.isUsableStale)) return cached.data;
 
-    try {
-      const searchRes = await fetch(`https://api.mangadex.org/manga?title=${encodeURIComponent(cleanTitle)}&limit=3&contentRating[]=safe&contentRating[]=suggestive&contentRating[]=erotica`);
-      if (searchRes.ok) {
-        const json = await searchRes.json() as any;
-        if (json.data && json.data.length > 0) {
-          const matchedId = json.data[0].id;
-          setCached(cacheKey, matchedId, 3600);
-          return matchedId;
+    return deduplicate(cacheKey, async () => {
+      try {
+        const searchRes = await fetchWithRetry(
+          `https://api.mangadex.org/manga?title=${encodeURIComponent(cleanTitle)}&limit=3&contentRating[]=safe&contentRating[]=suggestive&contentRating[]=erotica`
+        );
+        if (searchRes.ok) {
+          const json = await searchRes.json() as any;
+          if (json.data && json.data.length > 0) {
+            const matchedId = json.data[0].id;
+            setCachedEntry(cacheKey, matchedId, 86400); // 24h
+            return matchedId;
+          }
         }
+      } catch (e) {
+        console.warn('resolveMangaDexId error:', e);
       }
-    } catch (e) {
-      console.warn('resolveMangaDexId error:', e);
-    }
-    return null;
+      return null;
+    });
   };
 
   // 1. Manga Details Endpoint
   app.get('/api/manga/details', async (req: Request, res: Response) => {
     try {
-      const rawId = (req.query.id as string || '').trim();
-      if (!rawId) return res.status(400).json({ error: 'Manga ID is required' });
+      const rawParam = (req.query.id as string || '').trim();
+      if (!rawParam) return res.status(400).json({ error: 'Manga ID is required' });
 
-      const cacheKey = `manga_detail_${rawId}`;
-      const cached = getCached(cacheKey);
-      if (cached) return res.json({ data: cached });
-
-      const isNumeric = /^\d+$/.test(rawId);
-
-      if (!isNumeric) {
-        // Fetch from MangaDex by UUID
-        try {
-          const mdRes = await fetch(`https://api.mangadex.org/manga/${rawId}?includes[]=cover_art&includes[]=author&includes[]=artist`);
-          if (mdRes.ok) {
-            const mdJson = await mdRes.json() as any;
-            if (mdJson.data) {
-              const normalized = normalizeMangaDex(mdJson.data);
-              setCached(cacheKey, normalized, 1800);
-              return res.json({ data: normalized });
-            }
-          }
-        } catch (mdErr) {
-          console.warn(`MangaDex fetch for UUID ${rawId} failed:`, mdErr);
-        }
-      } else {
-        // Numeric MAL ID -> Fetch from Jikan with caching & MangaDex ID resolution
-        try {
-          const jikanRes = await fetch(`https://api.jikan.moe/v4/manga/${rawId}/full`);
-          if (jikanRes.ok) {
-            const jikanJson = await jikanRes.json() as any;
-            if (jikanJson.data) {
-              const jData = jikanJson.data;
-              const mainTitle = jData.title_english || jData.title || 'Unknown Manga';
-              const resolvedMdId = await resolveMangaDexId(mainTitle) || await resolveMangaDexId(jData.title);
-
-              const normalized = {
-                id: jData.mal_id,
-                mal_id: jData.mal_id,
-                provider: 'jikan',
-                providerId: jData.mal_id,
-                mangadexId: resolvedMdId,
-                title: jData.title,
-                title_english: jData.title_english || jData.title,
-                title_japanese: jData.title_japanese || '',
-                type: jData.type || 'Manga',
-                status: jData.status || 'Publishing',
-                synopsis: jData.synopsis || 'No synopsis provided.',
-                score: jData.score ? jData.score.toFixed(1) : '8.5',
-                rank: jData.rank || null,
-                chapters: jData.chapters || '??',
-                volumes: jData.volumes || '??',
-                images: {
-                  jpg: {
-                    large_image_url: jData.images?.jpg?.large_image_url || jData.images?.jpg?.image_url,
-                    image_url: jData.images?.jpg?.image_url,
-                  }
-                },
-                authors: (jData.authors || []).map((a: any) => ({ name: a.name, mal_id: a.mal_id })),
-                genres: (jData.genres || []).map((g: any) => ({ name: g.name, mal_id: g.mal_id })),
-                demographics: (jData.demographics || []).map((d: any) => ({ name: d.name })),
-              };
-
-              setCached(cacheKey, normalized, 1800);
-              return res.json({ data: normalized });
-            }
-          }
-        } catch (jikanErr) {
-          console.warn(`Jikan fetch for ID ${rawId} failed:`, jikanErr);
-        }
+      // Clean ID and determine provider prefix if present (e.g. "mangadex:uuid" or "jikan:123")
+      let provider = 'auto';
+      let cleanId = rawParam;
+      if (rawParam.startsWith('mangadex:')) {
+        provider = 'mangadex';
+        cleanId = rawParam.replace('mangadex:', '');
+      } else if (rawParam.startsWith('jikan:')) {
+        provider = 'jikan';
+        cleanId = rawParam.replace('jikan:', '');
       }
 
-      // Fallback search MangaDex with rawId as text query
-      const fallbackSearch = await fetch(`https://api.mangadex.org/manga?title=${encodeURIComponent(rawId)}&limit=1&includes[]=cover_art&includes[]=author`);
-      if (fallbackSearch.ok) {
-        const fbJson = await fallbackSearch.json() as any;
-        if (fbJson.data && fbJson.data.length > 0) {
-          const normalized = normalizeMangaDex(fbJson.data[0]);
-          setCached(cacheKey, normalized, 1800);
-          return res.json({ data: normalized });
+      const cacheKey = `manga_detail_${cleanId}`;
+      const cached = getCachedEntry(cacheKey);
+      if (cached && cached.isFresh) {
+        return res.json({ data: cached.data, cached: true });
+      }
+
+      const result = await deduplicate(cacheKey, async () => {
+        const isNumeric = /^\d+$/.test(cleanId);
+
+        if (provider === 'mangadex' || (!isNumeric && provider !== 'jikan')) {
+          // Fetch from MangaDex by UUID
+          try {
+            const mdRes = await fetchWithRetry(`https://api.mangadex.org/manga/${cleanId}?includes[]=cover_art&includes[]=author&includes[]=artist`);
+            if (mdRes.ok) {
+              const mdJson = await mdRes.json() as any;
+              if (mdJson.data) {
+                const normalized = normalizeMangaDex(mdJson.data);
+                setCachedEntry(cacheKey, normalized, 3600);
+                return normalized;
+              }
+            }
+          } catch (mdErr) {
+            console.warn(`MangaDex fetch for UUID ${cleanId} failed:`, mdErr);
+          }
         }
+
+        // Fetch from Jikan for numeric MAL IDs or secondary fallback
+        if (isNumeric || provider === 'jikan') {
+          try {
+            const jikanRes = await fetchWithRetry(`https://api.jikan.moe/v4/manga/${cleanId}/full`);
+            if (jikanRes.ok) {
+              const jikanJson = await jikanRes.json() as any;
+              if (jikanJson.data) {
+                const jData = jikanJson.data;
+                const mainTitle = jData.title_english || jData.title || 'Unknown Manga';
+                const resolvedMdId = await resolveMangaDexId(mainTitle) || await resolveMangaDexId(jData.title);
+
+                const normalized = {
+                  id: jData.mal_id,
+                  mal_id: jData.mal_id,
+                  provider: 'jikan',
+                  providerId: jData.mal_id,
+                  mangadexId: resolvedMdId,
+                  title: jData.title,
+                  title_english: jData.title_english || jData.title,
+                  title_japanese: jData.title_japanese || '',
+                  type: jData.type || 'Manga',
+                  status: jData.status || 'Publishing',
+                  synopsis: jData.synopsis || 'No synopsis provided.',
+                  score: jData.score ? jData.score.toFixed(1) : '8.5',
+                  rank: jData.rank || null,
+                  chapters: jData.chapters || '??',
+                  volumes: jData.volumes || '??',
+                  images: {
+                    jpg: {
+                      large_image_url: jData.images?.jpg?.large_image_url || jData.images?.jpg?.image_url,
+                      image_url: jData.images?.jpg?.image_url,
+                    }
+                  },
+                  authors: (jData.authors || []).map((a: any) => ({ name: a.name, mal_id: a.mal_id })),
+                  genres: (jData.genres || []).map((g: any) => ({ name: g.name, mal_id: g.mal_id })),
+                  demographics: (jData.demographics || []).map((d: any) => ({ name: d.name })),
+                };
+
+                setCachedEntry(cacheKey, normalized, 3600);
+                return normalized;
+              }
+            }
+          } catch (jikanErr) {
+            console.warn(`Jikan fetch for ID ${cleanId} failed:`, jikanErr);
+          }
+        }
+
+        // Fallback search MangaDex by title / text query
+        try {
+          const fallbackSearch = await fetchWithRetry(`https://api.mangadex.org/manga?title=${encodeURIComponent(cleanId)}&limit=1&includes[]=cover_art&includes[]=author`);
+          if (fallbackSearch.ok) {
+            const fbJson = await fallbackSearch.json() as any;
+            if (fbJson.data && fbJson.data.length > 0) {
+              const normalized = normalizeMangaDex(fbJson.data[0]);
+              setCachedEntry(cacheKey, normalized, 3600);
+              return normalized;
+            }
+          }
+        } catch (fbErr) {
+          console.warn('Fallback search error:', fbErr);
+        }
+
+        return null;
+      });
+
+      if (result) {
+        return res.json({ data: result });
+      }
+
+      // Serve stale cache if available when upstream fails
+      if (cached && cached.isUsableStale) {
+        return res.json({ data: cached.data, cached: true, isStale: true, notice: 'Showing recently cached results' });
       }
 
       return res.status(404).json({ error: 'Manga not found in catalog' });
     } catch (err) {
       console.error('Manga Details API Error:', err);
+      // Last-ditch check for any cache
+      const cached = getCachedEntry(`manga_detail_${(req.query.id as string || '').trim()}`);
+      if (cached && cached.data) {
+        return res.json({ data: cached.data, cached: true, isStale: true, notice: 'Showing recently cached results' });
+      }
       res.status(500).json({ error: 'Internal server error while fetching manga details' });
     }
   });
@@ -488,33 +582,41 @@ async function startServer() {
   // 2. Popular Manga
   app.get('/api/manga/popular', async (req: Request, res: Response) => {
     const cacheKey = 'manga_popular';
-    const cached = getCached(cacheKey);
-    if (cached) return res.json(cached);
+    const cached = getCachedEntry(cacheKey);
+    if (cached && cached.isFresh) return res.json({ ...cached.data, cached: true });
 
     try {
-      const mdRes = await fetch(
-        'https://api.mangadex.org/manga?limit=24&order[followedCount]=desc&includes[]=cover_art&includes[]=author&contentRating[]=safe&contentRating[]=suggestive'
-      );
-      if (mdRes.ok) {
-        const mdData = await mdRes.json() as any;
-        const normalized = {
-          data: (mdData.data || []).map(normalizeMangaDex),
-        };
-        setCached(cacheKey, normalized, 600);
-        return res.json(normalized);
-      }
-      throw new Error(`MangaDex status ${mdRes.status}`);
-    } catch (err) {
-      // Jikan fallback
-      try {
-        const jikanRes = await fetch('https://api.jikan.moe/v4/top/manga?limit=18&filter=bypopularity');
-        if (jikanRes.ok) {
-          const data = await jikanRes.json();
-          setCached(cacheKey, data, 600);
-          return res.json(data);
+      const data = await deduplicate(cacheKey, async () => {
+        try {
+          const mdRes = await fetchWithRetry(
+            'https://api.mangadex.org/manga?limit=24&order[followedCount]=desc&includes[]=cover_art&includes[]=author&contentRating[]=safe&contentRating[]=suggestive'
+          );
+          if (mdRes.ok) {
+            const mdData = await mdRes.json() as any;
+            const normalized = {
+              data: (mdData.data || []).map(normalizeMangaDex),
+            };
+            setCachedEntry(cacheKey, normalized, 900);
+            return normalized;
+          }
+        } catch (mdErr) {
+          console.warn('MangaDex popular failed, trying Jikan:', mdErr);
         }
-      } catch (fallbackErr) {
-        console.error('Manga Popular Fallback Error:', fallbackErr);
+
+        // Jikan Fallback
+        const jikanRes = await fetchWithRetry('https://api.jikan.moe/v4/top/manga?limit=18&filter=bypopularity');
+        if (jikanRes.ok) {
+          const jData = await jikanRes.json();
+          setCachedEntry(cacheKey, jData, 900);
+          return jData;
+        }
+        throw new Error('All popular providers failed');
+      });
+
+      return res.json(data);
+    } catch (err) {
+      if (cached && cached.isUsableStale) {
+        return res.json({ ...cached.data, cached: true, isStale: true, notice: 'Showing recently cached results' });
       }
       res.status(502).json({ error: 'Unable to fetch popular manga right now' });
     }
@@ -523,32 +625,41 @@ async function startServer() {
   // 3. Trending Manga
   app.get('/api/manga/trending', async (req: Request, res: Response) => {
     const cacheKey = 'manga_trending';
-    const cached = getCached(cacheKey);
-    if (cached) return res.json(cached);
+    const cached = getCachedEntry(cacheKey);
+    if (cached && cached.isFresh) return res.json({ ...cached.data, cached: true });
 
     try {
-      const mdRes = await fetch(
-        'https://api.mangadex.org/manga?limit=18&order[rating]=desc&order[followedCount]=desc&includes[]=cover_art&includes[]=author&contentRating[]=safe&contentRating[]=suggestive'
-      );
-      if (mdRes.ok) {
-        const mdData = await mdRes.json() as any;
-        const normalized = {
-          data: (mdData.data || []).map(normalizeMangaDex),
-        };
-        setCached(cacheKey, normalized, 600);
-        return res.json(normalized);
-      }
-      throw new Error(`MangaDex status ${mdRes.status}`);
-    } catch (err) {
-      try {
-        const jikanRes = await fetch('https://api.jikan.moe/v4/top/manga?limit=10&filter=publishing');
-        if (jikanRes.ok) {
-          const data = await jikanRes.json();
-          setCached(cacheKey, data, 600);
-          return res.json(data);
+      const data = await deduplicate(cacheKey, async () => {
+        try {
+          const mdRes = await fetchWithRetry(
+            'https://api.mangadex.org/manga?limit=18&order[rating]=desc&order[followedCount]=desc&includes[]=cover_art&includes[]=author&contentRating[]=safe&contentRating[]=suggestive'
+          );
+          if (mdRes.ok) {
+            const mdData = await mdRes.json() as any;
+            const normalized = {
+              data: (mdData.data || []).map(normalizeMangaDex),
+            };
+            setCachedEntry(cacheKey, normalized, 900);
+            return normalized;
+          }
+        } catch (mdErr) {
+          console.warn('MangaDex trending failed, trying Jikan:', mdErr);
         }
-      } catch (fallbackErr) {
-        console.error('Manga Trending Error:', fallbackErr);
+
+        // Jikan Fallback
+        const jikanRes = await fetchWithRetry('https://api.jikan.moe/v4/top/manga?limit=10&filter=publishing');
+        if (jikanRes.ok) {
+          const jData = await jikanRes.json();
+          setCachedEntry(cacheKey, jData, 900);
+          return jData;
+        }
+        throw new Error('All trending providers failed');
+      });
+
+      return res.json(data);
+    } catch (err) {
+      if (cached && cached.isUsableStale) {
+        return res.json({ ...cached.data, cached: true, isStale: true, notice: 'Showing recently cached results' });
       }
       res.status(502).json({ error: 'Unable to fetch trending manga' });
     }
@@ -557,24 +668,30 @@ async function startServer() {
   // 4. Latest Manga
   app.get('/api/manga/latest', async (req: Request, res: Response) => {
     const cacheKey = 'manga_latest';
-    const cached = getCached(cacheKey);
-    if (cached) return res.json(cached);
+    const cached = getCachedEntry(cacheKey);
+    if (cached && cached.isFresh) return res.json({ ...cached.data, cached: true });
 
     try {
-      const mdRes = await fetch(
-        'https://api.mangadex.org/manga?limit=24&order[latestUploadedChapter]=desc&includes[]=cover_art&includes[]=author&contentRating[]=safe&contentRating[]=suggestive'
-      );
-      if (mdRes.ok) {
-        const mdData = await mdRes.json() as any;
-        const normalized = {
-          data: (mdData.data || []).map(normalizeMangaDex),
-        };
-        setCached(cacheKey, normalized, 300);
-        return res.json(normalized);
-      }
-      throw new Error(`MangaDex status ${mdRes.status}`);
+      const data = await deduplicate(cacheKey, async () => {
+        const mdRes = await fetchWithRetry(
+          'https://api.mangadex.org/manga?limit=24&order[latestUploadedChapter]=desc&includes[]=cover_art&includes[]=author&contentRating[]=safe&contentRating[]=suggestive'
+        );
+        if (mdRes.ok) {
+          const mdData = await mdRes.json() as any;
+          const normalized = {
+            data: (mdData.data || []).map(normalizeMangaDex),
+          };
+          setCachedEntry(cacheKey, normalized, 600);
+          return normalized;
+        }
+        throw new Error(`MangaDex status ${mdRes.status}`);
+      });
+
+      return res.json(data);
     } catch (err) {
-      console.error('Manga Latest Error:', err);
+      if (cached && cached.isUsableStale) {
+        return res.json({ ...cached.data, cached: true, isStale: true, notice: 'Showing recently cached results' });
+      }
       res.status(502).json({ error: 'Unable to fetch latest manga' });
     }
   });
@@ -587,27 +704,51 @@ async function startServer() {
 
       if (!query && !genre) return res.status(400).json({ error: 'Query or genre parameter is required' });
 
-      const cacheKey = `manga_search_${(query || genre || '').toLowerCase()}`;
-      const cached = getCached(cacheKey);
-      if (cached) return res.json(cached);
+      const cleanQ = (query || genre || '').toString().trim().toLowerCase();
+      const cacheKey = `manga_search_${cleanQ}`;
+      const cached = getCachedEntry(cacheKey);
+      if (cached && cached.isFresh) return res.json({ ...cached.data, cached: true });
 
-      let url = `https://api.mangadex.org/manga?limit=28&includes[]=cover_art&includes[]=author&contentRating[]=safe&contentRating[]=suggestive&contentRating[]=erotica`;
-      if (query) {
-        url += `&title=${encodeURIComponent(query)}`;
-      }
+      const data = await deduplicate(cacheKey, async () => {
+        let url = `https://api.mangadex.org/manga?limit=28&includes[]=cover_art&includes[]=author&contentRating[]=safe&contentRating[]=suggestive&contentRating[]=erotica`;
+        if (query) {
+          url += `&title=${encodeURIComponent(query)}`;
+        }
 
-      const mdRes = await fetch(url);
-      if (mdRes.ok) {
-        const mdData = await mdRes.json() as any;
-        const normalized = {
-          data: (mdData.data || []).map(normalizeMangaDex),
-        };
-        setCached(cacheKey, normalized, 300);
-        return res.json(normalized);
-      }
-      throw new Error(`MangaDex search failed ${mdRes.status}`);
+        try {
+          const mdRes = await fetchWithRetry(url);
+          if (mdRes.ok) {
+            const mdData = await mdRes.json() as any;
+            const normalized = {
+              data: (mdData.data || []).map(normalizeMangaDex),
+            };
+            setCachedEntry(cacheKey, normalized, 600);
+            return normalized;
+          }
+        } catch (mdErr) {
+          console.warn('MangaDex search failed, trying Jikan fallback:', mdErr);
+        }
+
+        // Jikan search fallback
+        if (query) {
+          const jikanRes = await fetchWithRetry(`https://api.jikan.moe/v4/manga?q=${encodeURIComponent(query)}&limit=24&order_by=popularity&sort=desc`);
+          if (jikanRes.ok) {
+            const jData = await jikanRes.json();
+            setCachedEntry(cacheKey, jData, 600);
+            return jData;
+          }
+        }
+
+        throw new Error('Search failed across providers');
+      });
+
+      return res.json(data);
     } catch (error) {
       console.error('Manga Search Proxy Error:', error);
+      const cached = getCachedEntry(`manga_search_${(req.query.title || req.query.q || req.query.genre || '').toString().toLowerCase()}`);
+      if (cached && cached.isUsableStale) {
+        return res.json({ ...cached.data, cached: true, isStale: true, notice: 'Showing recently cached results' });
+      }
       res.status(500).json({ error: 'Failed to search manga repository' });
     }
   });
@@ -627,9 +768,8 @@ async function startServer() {
         if (title) {
           targetMdId = await resolveMangaDexId(title) || rawId;
         } else {
-          // Look up title from Jikan to find MangaDex ID
           try {
-            const jRes = await fetch(`https://api.jikan.moe/v4/manga/${rawId}`);
+            const jRes = await fetchWithRetry(`https://api.jikan.moe/v4/manga/${rawId}`);
             if (jRes.ok) {
               const jData = await jRes.json() as any;
               const t = jData.data?.title_english || jData.data?.title;
@@ -642,70 +782,79 @@ async function startServer() {
       }
 
       const cacheKey = `manga_feed_${targetMdId}`;
-      const cached = getCached(cacheKey);
-      if (cached) return res.json(cached);
+      const cached = getCachedEntry(cacheKey);
+      if (cached && cached.isFresh) return res.json({ ...cached.data, cached: true });
 
-      // Fetch first batch of English chapters (up to 100)
-      const feedUrl1 = `https://api.mangadex.org/manga/${targetMdId}/feed?translatedLanguage[]=en&limit=100&offset=0&order[chapter]=asc&contentRating[]=safe&contentRating[]=suggestive&contentRating[]=erotica`;
-      const mdRes1 = await fetch(feedUrl1);
-      if (!mdRes1.ok) {
-        throw new Error(`MangaDex feed error: ${mdRes1.status}`);
-      }
-
-      const rawFeed1 = await mdRes1.json() as any;
-      let rawChapters = rawFeed1.data || [];
-      const totalAvailable = rawFeed1.total || rawChapters.length;
-
-      // If more than 100 chapters exist, fetch next pages
-      if (totalAvailable > 100) {
-        const offsets = [];
-        for (let o = 100; o < Math.min(totalAvailable, 500); o += 100) {
-          offsets.push(o);
+      const payload = await deduplicate(cacheKey, async () => {
+        // Fetch English chapters
+        const feedUrl1 = `https://api.mangadex.org/manga/${targetMdId}/feed?translatedLanguage[]=en&limit=100&offset=0&order[chapter]=asc&contentRating[]=safe&contentRating[]=suggestive&contentRating[]=erotica`;
+        const mdRes1 = await fetchWithRetry(feedUrl1);
+        if (!mdRes1.ok) {
+          throw new Error(`MangaDex feed error: ${mdRes1.status}`);
         }
-        const extraPages = await Promise.allSettled(
-          offsets.map(offset =>
-            fetch(`https://api.mangadex.org/manga/${targetMdId}/feed?translatedLanguage[]=en&limit=100&offset=${offset}&order[chapter]=asc&contentRating[]=safe&contentRating[]=suggestive&contentRating[]=erotica`)
-              .then(r => r.ok ? r.json() : null)
-          )
-        );
-        extraPages.forEach(p => {
-          if (p.status === 'fulfilled' && p.value?.data) {
-            rawChapters = rawChapters.concat(p.value.data);
-          }
-        });
-      }
 
-      // Deduplicate and normalize chapters
-      const normalizedChapters = rawChapters
-        .filter((ch: any) => ch.attributes && (ch.attributes.chapter || ch.attributes.title))
-        .map((ch: any) => ({
-          id: ch.id,
-          chapter: ch.attributes?.chapter || '1',
-          volume: ch.attributes?.volume || null,
-          title: ch.attributes?.title || '',
-          pages: ch.attributes?.pages || 0,
-          externalUrl: ch.attributes?.externalUrl || null,
-          publishAt: ch.attributes?.publishAt || ch.attributes?.readableAt,
-          attributes: {
+        const rawFeed1 = await mdRes1.json() as any;
+        let rawChapters = rawFeed1.data || [];
+        const totalAvailable = rawFeed1.total || rawChapters.length;
+
+        // If more than 100 chapters exist, fetch next pages with bounded parallelism
+        if (totalAvailable > 100) {
+          const offsets = [];
+          for (let o = 100; o < Math.min(totalAvailable, 400); o += 100) {
+            offsets.push(o);
+          }
+          const extraPages = await Promise.allSettled(
+            offsets.map((offset) =>
+              fetchWithRetry(
+                `https://api.mangadex.org/manga/${targetMdId}/feed?translatedLanguage[]=en&limit=100&offset=${offset}&order[chapter]=asc&contentRating[]=safe&contentRating[]=suggestive&contentRating[]=erotica`
+              ).then((r) => (r.ok ? r.json() : null))
+            )
+          );
+          extraPages.forEach((p) => {
+            if (p.status === 'fulfilled' && p.value?.data) {
+              rawChapters = rawChapters.concat(p.value.data);
+            }
+          });
+        }
+
+        // Deduplicate and normalize chapters
+        const normalizedChapters = rawChapters
+          .filter((ch: any) => ch.attributes && (ch.attributes.chapter || ch.attributes.title))
+          .map((ch: any) => ({
+            id: ch.id,
             chapter: ch.attributes?.chapter || '1',
+            volume: ch.attributes?.volume || null,
             title: ch.attributes?.title || '',
             pages: ch.attributes?.pages || 0,
             externalUrl: ch.attributes?.externalUrl || null,
-          }
-        }))
-        .sort((a: any, b: any) => parseFloat(a.chapter || '0') - parseFloat(b.chapter || '0'))
-        .filter((v: any, i: number, a: any[]) => a.findIndex((t: any) => t.chapter === v.chapter) === i);
+            publishAt: ch.attributes?.publishAt || ch.attributes?.readableAt,
+            attributes: {
+              chapter: ch.attributes?.chapter || '1',
+              title: ch.attributes?.title || '',
+              pages: ch.attributes?.pages || 0,
+              externalUrl: ch.attributes?.externalUrl || null,
+            },
+          }))
+          .sort((a: any, b: any) => parseFloat(a.chapter || '0') - parseFloat(b.chapter || '0'))
+          .filter((v: any, i: number, a: any[]) => a.findIndex((t: any) => t.chapter === v.chapter) === i);
 
-      const responsePayload = {
-        mangadexId: targetMdId,
-        data: normalizedChapters,
-        total: normalizedChapters.length,
-      };
+        const responsePayload = {
+          mangadexId: targetMdId,
+          data: normalizedChapters,
+          total: normalizedChapters.length,
+        };
 
-      setCached(cacheKey, responsePayload, 600);
-      return res.json(responsePayload);
+        setCachedEntry(cacheKey, responsePayload, 3600);
+        return responsePayload;
+      });
+
+      return res.json(payload);
     } catch (error) {
       console.error('Manga Feed Proxy Error:', error);
+      const cached = getCachedEntry(`manga_feed_${(req.query.id as string || '').trim()}`);
+      if (cached && cached.isUsableStale) {
+        return res.json({ ...cached.data, cached: true, isStale: true, notice: 'Showing recently cached results' });
+      }
       res.status(500).json({ error: 'Failed to fetch manga chapter feed' });
     }
   });
@@ -717,28 +866,36 @@ async function startServer() {
       if (!id || typeof id !== 'string') return res.status(400).json({ error: 'Chapter ID is required' });
 
       const cacheKey = `manga_pages_${id}`;
-      const cached = getCached(cacheKey);
-      if (cached) return res.json(cached);
+      const cached = getCachedEntry(cacheKey);
+      if (cached && cached.isFresh) return res.json({ ...cached.data, cached: true });
 
-      const chapterRes = await fetch(`https://api.mangadex.org/at-home/server/${id}`);
-      if (!chapterRes.ok) {
-        throw new Error(`MangaDex at-home returned status ${chapterRes.status}`);
-      }
-      const chapterData = await chapterRes.json() as any;
-      if (!chapterData.chapter) throw new Error('Chapter not found on MangaDex');
+      const payload = await deduplicate(cacheKey, async () => {
+        const chapterRes = await fetchWithRetry(`https://api.mangadex.org/at-home/server/${id}`);
+        if (!chapterRes.ok) {
+          throw new Error(`MangaDex at-home returned status ${chapterRes.status}`);
+        }
+        const chapterData = await chapterRes.json() as any;
+        if (!chapterData.chapter) throw new Error('Chapter not found on MangaDex');
 
-      const host = chapterData.baseUrl;
-      const hash = chapterData.chapter.hash;
-      const filenames = chapterData.chapter.data || chapterData.chapter.dataSaver || [];
-      const type = chapterData.chapter.data ? 'data' : 'data-saver';
+        const host = chapterData.baseUrl;
+        const hash = chapterData.chapter.hash;
+        const filenames = chapterData.chapter.data || chapterData.chapter.dataSaver || [];
+        const type = chapterData.chapter.data ? 'data' : 'data-saver';
 
-      const pages = filenames.map((f: string) => `${host}/${type}/${hash}/${f}`);
-      const payload = { pages, total: pages.length, host, hash };
-      
-      setCached(cacheKey, payload, 1800);
+        const pages = filenames.map((f: string) => `${host}/${type}/${hash}/${f}`);
+        const result = { pages, total: pages.length, host, hash };
+        
+        setCachedEntry(cacheKey, result, 7200); // 2 hours
+        return result;
+      });
+
       return res.json(payload);
     } catch (error) {
       console.error('Manga Pages Proxy Error:', error);
+      const cached = getCachedEntry(`manga_pages_${req.query.id}`);
+      if (cached && cached.isUsableStale) {
+        return res.json({ ...cached.data, cached: true, isStale: true, notice: 'Showing recently cached results' });
+      }
       res.status(500).json({ error: 'Unable to load chapter pages from provider' });
     }
   });

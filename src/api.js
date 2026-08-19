@@ -30,7 +30,40 @@ const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 // Global Queue for Jikan to prevent 429 Parallel Hits
 let jikanQueue = Promise.resolve();
 
-// Manga Engine API via Dedicated Backend Proxy
+// Manga Engine API via Dedicated Backend Proxy (Zero direct client-side external hits)
+export const fetchMangaPopular = async () => {
+    const backendUrl = import.meta.env.VITE_BACKEND_URL || import.meta.env.VITE_API_URL || '';
+    try {
+        const res = await fetch(`${backendUrl}/api/manga/popular`);
+        if (res.ok) return await res.json();
+    } catch (e) {
+        console.warn('fetchMangaPopular backend error:', e);
+    }
+    return { data: [] };
+};
+
+export const fetchMangaTrending = async () => {
+    const backendUrl = import.meta.env.VITE_BACKEND_URL || import.meta.env.VITE_API_URL || '';
+    try {
+        const res = await fetch(`${backendUrl}/api/manga/trending`);
+        if (res.ok) return await res.json();
+    } catch (e) {
+        console.warn('fetchMangaTrending backend error:', e);
+    }
+    return { data: [] };
+};
+
+export const fetchMangaLatest = async () => {
+    const backendUrl = import.meta.env.VITE_BACKEND_URL || import.meta.env.VITE_API_URL || '';
+    try {
+        const res = await fetch(`${backendUrl}/api/manga/latest`);
+        if (res.ok) return await res.json();
+    } catch (e) {
+        console.warn('fetchMangaLatest backend error:', e);
+    }
+    return { data: [] };
+};
+
 export const fetchMangaDetails = async (id) => {
     const backendUrl = import.meta.env.VITE_BACKEND_URL || import.meta.env.VITE_API_URL || '';
     try {
@@ -90,10 +123,9 @@ export const fetchMangaSearch = async (query, genre = '') => {
     return { data: [] };
 };
 
-export const fetchManga = async (path, params = {}, retryCount = 0) => {
+export const fetchManga = async (path, params = {}) => {
     const backendUrl = import.meta.env.VITE_BACKEND_URL || import.meta.env.VITE_API_URL || '';
     
-    // Check if we have dedicated backend proxy routes for common manga queries
     if (path === '/top/manga' || path.startsWith('/top/manga')) {
         const filter = params.filter;
         const endpoint = filter === 'publishing' ? '/api/manga/trending' : '/api/manga/popular';
@@ -101,16 +133,16 @@ export const fetchManga = async (path, params = {}, retryCount = 0) => {
             const res = await fetch(`${backendUrl}${endpoint}`);
             if (res.ok) return await res.json();
         } catch (e) {
-            console.warn('Backend proxy failed, attempting Jikan fallback:', e);
+            console.warn('fetchManga proxy error:', e);
         }
     }
 
-    if (path === '/manga' && !params.q && (params.type || params.order_by)) {
+    if (path === '/manga' && !params.q) {
         try {
             const res = await fetch(`${backendUrl}/api/manga/popular`);
             if (res.ok) return await res.json();
         } catch (e) {
-            console.warn('Backend proxy failed, attempting Jikan fallback:', e);
+            console.warn('fetchManga popular proxy error:', e);
         }
     }
 
@@ -119,43 +151,23 @@ export const fetchManga = async (path, params = {}, retryCount = 0) => {
             const res = await fetch(`${backendUrl}/api/manga/search?q=${encodeURIComponent(params.q)}`);
             if (res.ok) return await res.json();
         } catch (e) {
-            console.warn('Backend search proxy failed:', e);
+            console.warn('fetchManga search proxy error:', e);
         }
     }
 
-    if (path.startsWith('/manga/') && path.includes('/full')) {
-        const idMatch = path.match(/\/manga\/([^/]+)\/full/);
+    if (path.startsWith('/manga/')) {
+        const idMatch = path.match(/\/manga\/([^/]+)/);
         if (idMatch && idMatch[1]) {
             try {
                 const res = await fetch(`${backendUrl}/api/manga/details?id=${encodeURIComponent(idMatch[1])}`);
                 if (res.ok) return await res.json();
             } catch (e) {
-                console.warn('Backend details proxy failed:', e);
+                console.warn('fetchManga details proxy error:', e);
             }
         }
     }
 
-    return (jikanQueue = jikanQueue.then(async () => {
-        const url = new URL(`https://api.jikan.moe/v4${path}`);
-        Object.keys(params).forEach(key => url.searchParams.set(key, params[key]));
-
-        try {
-            const res = await fetch(url.toString());
-            await delay(400);
-
-            if (res.status === 429 && retryCount < 3) {
-                console.warn(`Jikan 429 Rate Limit. Backing off retry ${retryCount + 1}...`);
-                await delay(1500 * (retryCount + 1));
-                return fetchManga(path, params, retryCount + 1);
-            }
-
-            const data = await res.json();
-            return data;
-        } catch (error) {
-            console.error('Manga API Error:', error);
-            return null;
-        }
-    }));
+    return { data: [] };
 };
 
 export const fetchYouTube = async (query) => {

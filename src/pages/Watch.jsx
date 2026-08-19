@@ -1,20 +1,19 @@
-import { useEffect, useState, useRef, useCallback } from 'react';
+import { useEffect, useState, useRef, useCallback, useMemo } from 'react';
 import { io } from 'socket.io-client';
 import { useParams, useNavigate, Link } from 'react-router-dom';
 import { fetchApi, getImageUrl } from '../api';
 import { 
     PlayCircle, ArrowLeft, Server, Star, List, Heart, SkipBack, SkipForward, 
-    Plus, Share2, Zap, Triangle, Hexagon, Play, RefreshCw, AlertCircle, Home, Film, Tv
+    Plus, Share2, Zap, Triangle, Hexagon, Play, RefreshCw, AlertCircle, Home, Film, Tv,
+    Check, Volume2, Globe, Info, ShieldCheck, CheckCircle2, XCircle
 } from 'lucide-react';
 import { useWatchlist } from '../hooks/useWatchlist';
 import { useContinueWatching } from '../hooks/useContinueWatching';
-
-const SERVERS = [
-    { name: 'Vidlink', url: (id, t, s, e, lang = 'en') => t === 'movie' ? `https://vidlink.pro/movie/${id}?primaryColor=ffcc00&audio=${lang}&lang=${lang}&ds=${lang}` : `https://vidlink.pro/tv/${id}/${s}/${e}?primaryColor=ffcc00&audio=${lang}&lang=${lang}&ds=${lang}` },
-    { name: 'VidSrc', url: (id, t, s, e, lang = 'en') => t === 'movie' ? `https://vidsrc.me/embed/movie?tmdb=${id}&lang=${lang}` : `https://vidsrc.me/embed/tv?tmdb=${id}&sea=${s}&epi=${e}&lang=${lang}` },
-    { name: 'VidSrc PRO', url: (id, t, s, e, lang = 'en') => t === 'movie' ? `https://vidsrc.pm/embed/movie/${id}?audio=${lang}` : `https://vidsrc.pm/embed/tv/${id}/${s}/${e}?audio=${lang}` },
-    { name: 'Embed.su', url: (id, t, s, e, lang = 'en') => t === 'movie' ? `https://embed.su/embed/movie/${id}?audio=${lang}` : `https://embed.su/embed/tv/${id}/${s}/${e}?audio=${lang}` },
-];
+import { 
+    STREAMING_SERVERS, 
+    getRealLanguageAvailability, 
+    resolveServerForLanguage 
+} from '../services/streamingMatrix';
 
 export default function Watch({ explicitType, explicitId, startTime, partyRoom, isHost, username, socket }) {
     const params = useParams();
@@ -32,21 +31,61 @@ export default function Watch({ explicitType, explicitId, startTime, partyRoom, 
 
     const [season, setSeason] = useState(1);
     const [episode, setEpisode] = useState(1);
-    const [activeServer, setActiveServer] = useState(0);
+    const [activeServerIndex, setActiveServerIndex] = useState(0);
     const [episodesList, setEpisodesList] = useState([]);
     const [activeTab, setActiveTab] = useState('Synopsis');
-    const [selectedAudio, setSelectedAudio] = useState('Original');
+    const [selectedAudioCode, setSelectedAudioCode] = useState('en');
+    const [switchNotice, setSwitchNotice] = useState(null);
 
-    const AUDIO_TRACKS = [
-        { id: 'en', label: 'Original', available: true },
-        { id: 'hi', label: 'Hindi Dub', available: true },
-        { id: 'ja', label: 'Japanese', available: detail?.original_language === 'ja' || rawType === 'anime' },
-        { id: 'en-dub', label: 'English Dub', available: rawType === 'anime' || activeMediaType === 'tv' }
-    ].filter(t => t.available);
+    const activeServer = STREAMING_SERVERS[activeServerIndex] || STREAMING_SERVERS[0];
+
+    // Compute real language availability based on verified provider capabilities & title metadata
+    const evaluatedLanguages = useMemo(() => {
+        return getRealLanguageAvailability(detail, rawType === 'anime' ? 'anime' : activeMediaType, activeServer);
+    }, [detail, rawType, activeMediaType, activeServer]);
 
     const { toggleWatchlist, isInWatchlist } = useWatchlist();
     const { history, addToHistory } = useContinueWatching();
     const inList = detail?.id ? isInWatchlist(detail.id, activeMediaType) : false;
+
+    // Handle audio track selection with server resolution
+    const handleAudioSelect = (lang) => {
+        if (!lang.available) {
+            setSwitchNotice({
+                type: 'error',
+                message: `${lang.label} is not available for this title on any verified provider.`
+            });
+            setTimeout(() => setSwitchNotice(null), 4000);
+            return;
+        }
+
+        const resolution = resolveServerForLanguage(lang.code, activeServer, evaluatedLanguages);
+
+        if (resolution.switched && resolution.server) {
+            const targetIdx = STREAMING_SERVERS.findIndex(s => s.id === resolution.server.id);
+            if (targetIdx !== -1) {
+                setActiveServerIndex(targetIdx);
+            }
+            setSelectedAudioCode(lang.code);
+            setSwitchNotice({
+                type: 'success',
+                message: `Switched stream server to ${resolution.server.name} to deliver ${lang.label}.`
+            });
+        } else if (resolution.error) {
+            setSwitchNotice({
+                type: 'error',
+                message: resolution.error
+            });
+        } else {
+            setSelectedAudioCode(lang.code);
+            setSwitchNotice({
+                type: 'success',
+                message: `Audio track switched to ${lang.label} on ${activeServer.name}.`
+            });
+        }
+
+        setTimeout(() => setSwitchNotice(null), 4000);
+    };
 
     // Restore season & episode from history if available
     useEffect(() => {
@@ -245,8 +284,7 @@ export default function Watch({ explicitType, explicitId, startTime, partyRoom, 
         overview: detail.overview || 'Enjoy this episode.' 
     };
 
-    const selectedAudioCode = AUDIO_TRACKS.find(t => t.label === selectedAudio)?.id || 'en';
-    const currentServerUrl = SERVERS[activeServer]?.url(id, activeMediaType, season, episode, selectedAudioCode) || '';
+    const currentServerUrl = activeServer.url(id, activeMediaType, season, episode, selectedAudioCode) || '';
 
     return (
         <div className="min-h-screen bg-[#080808] text-white overflow-y-auto relative selection:bg-[#ff4d4d] selection:text-white pb-40 custom-scrollbar">
@@ -343,23 +381,40 @@ export default function Watch({ explicitType, explicitId, startTime, partyRoom, 
                             </button>
                         </div>
 
-                        {/* Interactive Audio Selector */}
-                        <div className="relative group w-full md:w-fit overflow-x-auto">
-                            <div className="bg-white/5 backdrop-blur-2xl border border-white/10 rounded-2xl p-1.5 flex gap-1 items-center shadow-xl min-w-fit">
-                                <div className="px-3 py-1.5 border-r border-white/5 opacity-40 text-[9px] font-black uppercase tracking-widest hidden sm:block shrink-0">
-                                    Audio Track
-                                </div>
-                                <div className="flex gap-1">
-                                    {AUDIO_TRACKS.map((track) => (
+                        {/* Interactive Real Audio Selector with Verified Indicators */}
+                        <div className="flex flex-col gap-2">
+                            <div className="flex items-center gap-2 text-[10px] font-black uppercase tracking-wider text-white/50">
+                                <Volume2 size={12} className="text-[#ff4d4d]" />
+                                <span>Verified Audio Tracks</span>
+                                <span className="text-white/30 text-[9px] font-medium">(Real Multi-Language Engine)</span>
+                            </div>
+
+                            <div className="bg-white/5 backdrop-blur-2xl border border-white/10 rounded-2xl p-1.5 flex flex-wrap gap-1.5 items-center shadow-xl w-full md:w-fit">
+                                {evaluatedLanguages.map((lang) => {
+                                    const isSelected = selectedAudioCode === lang.code;
+                                    return (
                                         <button
-                                            key={track.id}
-                                            onClick={() => setSelectedAudio(track.label)}
-                                            className={`relative px-4 py-2 rounded-xl text-[9px] md:text-[10px] font-black uppercase tracking-wider transition-all duration-300 ${selectedAudio === track.label ? 'bg-[#ff4d4d] text-white shadow-lg shadow-[#ff4d4d]/30' : 'text-white/40 hover:text-white hover:bg-white/5'}`}
+                                            key={lang.code}
+                                            onClick={() => handleAudioSelect(lang)}
+                                            disabled={!lang.available}
+                                            title={lang.available ? `${lang.label} - Supported on ${lang.serverName}` : `${lang.label} - Unavailable for this title`}
+                                            className={`relative px-3.5 py-2 rounded-xl text-[10px] font-black uppercase tracking-wider transition-all duration-300 flex items-center gap-2 ${
+                                                isSelected 
+                                                    ? 'bg-[#ff4d4d] text-white shadow-lg shadow-[#ff4d4d]/30' 
+                                                    : lang.available 
+                                                        ? 'text-white/70 hover:text-white hover:bg-white/10 bg-white/5' 
+                                                        : 'text-white/20 bg-transparent opacity-40 cursor-not-allowed'
+                                            }`}
                                         >
-                                            {track.label}
+                                            <span>{lang.label}</span>
+                                            {lang.available ? (
+                                                <span className={`w-1.5 h-1.5 rounded-full ${isSelected ? 'bg-white' : 'bg-[#1db954]'}`}></span>
+                                            ) : (
+                                                <span className="text-[8px] font-normal text-white/30 lowercase tracking-normal">n/a</span>
+                                            )}
                                         </button>
-                                    ))}
-                                </div>
+                                    );
+                                })}
                             </div>
                         </div>
                     </div>
@@ -401,11 +456,23 @@ export default function Watch({ explicitType, explicitId, startTime, partyRoom, 
 
                 {/* Main Content Node: Player + Station Selection */}
                 <div id="main-video-player" className="grid grid-cols-1 xl:grid-cols-12 gap-10 items-start animate-entrance">
-                    <main className="xl:col-span-8 flex flex-col gap-8">
+                    <main className="xl:col-span-8 flex flex-col gap-6">
+                         {/* Switcher Toast Notice */}
+                         {switchNotice && (
+                             <div className={`p-4 rounded-2xl border flex items-center gap-3 transition-all animate-fadeIn ${
+                                 switchNotice.type === 'success' 
+                                     ? 'bg-[#1db954]/10 border-[#1db954]/30 text-[#1db954]' 
+                                     : 'bg-[#ff4d4d]/10 border-[#ff4d4d]/30 text-[#ff4d4d]'
+                             }`}>
+                                 {switchNotice.type === 'success' ? <CheckCircle2 size={16} /> : <AlertCircle size={16} />}
+                                 <span className="text-xs font-bold">{switchNotice.message}</span>
+                             </div>
+                         )}
+
                          {/* High-Precision Video Player Box */}
                          <div className="relative aspect-video rounded-2xl md:rounded-[2.5rem] overflow-hidden border-2 border-white/10 shadow-2xl bg-black">
                               <iframe
-                                key={`${activeServer}-${season}-${episode}-${selectedAudioCode}`}
+                                key={`${activeServer.id}-${season}-${episode}-${selectedAudioCode}`}
                                 src={currentServerUrl}
                                 className="w-full h-full border-none"
                                 allowFullScreen
@@ -419,25 +486,52 @@ export default function Watch({ explicitType, explicitId, startTime, partyRoom, 
                               <div className="flex items-center justify-between mb-6">
                                    <div className="flex items-center gap-3">
                                         <div className="w-1.5 h-6 bg-[#ff4d4d] rounded-full"></div>
-                                        <h3 className="text-base md:text-lg font-black uppercase tracking-wider">
-                                            Streaming Server Node
-                                        </h3>
+                                        <div>
+                                            <h3 className="text-base md:text-lg font-black uppercase tracking-wider">
+                                                Streaming Server Node
+                                            </h3>
+                                            <p className="text-[10px] text-white/40 font-medium">
+                                                Active Server: <span className="text-white font-bold">{activeServer.name}</span> ({activeServer.tag})
+                                            </p>
+                                        </div>
                                    </div>
-                                   <span className="text-[10px] font-black uppercase tracking-widest text-white/30">
+                                   <span className="text-[10px] font-black uppercase tracking-widest text-white/30 hidden sm:block">
                                        Switch Server if stream buffers
                                    </span>
                               </div>
                               <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-                                   {SERVERS.map((srv, idx) => (
-                                       <button 
-                                          key={idx}
-                                          onClick={() => setActiveServer(idx)}
-                                          className={`p-4 rounded-2xl transition-all duration-300 border flex flex-col gap-2 text-left ${activeServer === idx ? 'bg-[#ff4d4d] border-[#ff4d4d] text-white shadow-[0_10px_30px_rgba(255,77,77,0.3)]' : 'bg-white/5 border-white/5 hover:border-white/20 text-white/60 hover:text-white hover:bg-white/10'}`}
-                                       >
-                                           <Server size={16} className={activeServer === idx ? 'text-white' : 'text-white/40'} />
-                                           <span className="text-[10px] font-black uppercase tracking-widest">{srv.name}</span>
-                                       </button>
-                                   ))}
+                                   {STREAMING_SERVERS.map((srv, idx) => {
+                                       const isCurrent = activeServerIndex === idx;
+                                       return (
+                                           <button 
+                                              key={srv.id}
+                                              onClick={() => {
+                                                  setActiveServerIndex(idx);
+                                                  setSwitchNotice({
+                                                      type: 'success',
+                                                      message: `Active stream server changed to ${srv.name} (${srv.tag}).`
+                                                  });
+                                                  setTimeout(() => setSwitchNotice(null), 3000);
+                                              }}
+                                              className={`p-4 rounded-2xl transition-all duration-300 border flex flex-col gap-1.5 text-left ${
+                                                  isCurrent 
+                                                      ? 'bg-[#ff4d4d] border-[#ff4d4d] text-white shadow-[0_10px_30px_rgba(255,77,77,0.3)]' 
+                                                      : 'bg-white/5 border-white/5 hover:border-white/20 text-white/60 hover:text-white hover:bg-white/10'
+                                              }`}
+                                           >
+                                               <div className="flex items-center justify-between">
+                                                   <Server size={16} className={isCurrent ? 'text-white' : 'text-white/40'} />
+                                                   <span className={`text-[8px] font-black uppercase px-1.5 py-0.5 rounded ${
+                                                       isCurrent ? 'bg-black/30 text-white' : 'bg-white/10 text-white/50'
+                                                   }`}>
+                                                       {srv.tag}
+                                                   </span>
+                                               </div>
+                                               <span className="text-[11px] font-black uppercase tracking-wider">{srv.name}</span>
+                                               <span className="text-[8px] opacity-60 line-clamp-1">{srv.supportedLanguages.join(', ').toUpperCase()}</span>
+                                           </button>
+                                       );
+                                   })}
                               </div>
                          </div>
                     </main>
