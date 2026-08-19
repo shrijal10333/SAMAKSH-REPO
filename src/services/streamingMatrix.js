@@ -9,6 +9,7 @@ export const STREAMING_SERVERS = [
     {
         id: 'vidlink',
         name: 'VidLink (Multi-Audio)',
+        tag: 'Multi-Track',
         badge: 'Multi-Track',
         description: 'Supports dynamic multi-track audio switching and multi-language subs.',
         capabilities: {
@@ -18,6 +19,14 @@ export const STREAMING_SERVERS = [
             supportsTv: true,
             supportsMovie: true,
             quality: '1080p'
+        },
+        url: (id, type, season = 1, episode = 1, lang = 'en') => {
+            const isMovie = type === 'movie';
+            const base = 'https://vidlink.pro';
+            if (isMovie) {
+                return `${base}/movie/${id}?primaryColor=ff4d4d&secondaryColor=1db954&iconColor=ff4d4d&title=true&poster=true&audio=${lang}&lang=${lang}&ds=${lang}`;
+            }
+            return `${base}/tv/${id}/${season}/${episode}?primaryColor=ff4d4d&secondaryColor=1db954&iconColor=ff4d4d&title=true&poster=true&audio=${lang}&lang=${lang}&ds=${lang}`;
         },
         getUrl: (id, type, season = 1, episode = 1, lang = 'en') => {
             const isMovie = type === 'movie';
@@ -31,6 +40,7 @@ export const STREAMING_SERVERS = [
     {
         id: 'autoembed',
         name: 'AutoEmbed (Dubs & Multi)',
+        tag: 'Fast Stream',
         badge: 'Fast Stream',
         description: 'Auto-detecting multi-language dubbed feeds and fast CDN playback.',
         capabilities: {
@@ -40,6 +50,14 @@ export const STREAMING_SERVERS = [
             supportsTv: true,
             supportsMovie: true,
             quality: '1080p'
+        },
+        url: (id, type, season = 1, episode = 1, lang = 'en') => {
+            const isMovie = type === 'movie';
+            const base = 'https://player.autoembed.cc/embed';
+            if (isMovie) {
+                return `${base}/movie/${id}?lang=${lang}&audio=${lang}`;
+            }
+            return `${base}/tv/${id}/${season}/${episode}?lang=${lang}&audio=${lang}`;
         },
         getUrl: (id, type, season = 1, episode = 1, lang = 'en') => {
             const isMovie = type === 'movie';
@@ -53,6 +71,7 @@ export const STREAMING_SERVERS = [
     {
         id: 'smashystream',
         name: 'SmashyStream (Regional & Dubs)',
+        tag: 'Regional Audio',
         badge: 'Regional Audio',
         description: 'Dedicated regional multi-audio and dubbed language stream options.',
         capabilities: {
@@ -62,6 +81,14 @@ export const STREAMING_SERVERS = [
             supportsTv: true,
             supportsMovie: true,
             quality: '1080p'
+        },
+        url: (id, type, season = 1, episode = 1, lang = 'en') => {
+            const isMovie = type === 'movie';
+            const base = 'https://embed.smashystream.com/playere.php';
+            if (isMovie) {
+                return `${base}?tmdb=${id}&lang=${lang}`;
+            }
+            return `${base}?tmdb=${id}&season=${season}&episode=${episode}&lang=${lang}`;
         },
         getUrl: (id, type, season = 1, episode = 1, lang = 'en') => {
             const isMovie = type === 'movie';
@@ -75,6 +102,7 @@ export const STREAMING_SERVERS = [
     {
         id: 'vidsrc',
         name: 'VidSrc (Original Feed)',
+        tag: 'Direct Master',
         badge: 'Direct Master',
         description: 'Direct high-bitrate master feed in original studio language.',
         capabilities: {
@@ -84,6 +112,13 @@ export const STREAMING_SERVERS = [
             supportsTv: true,
             supportsMovie: true,
             quality: '1080p'
+        },
+        url: (id, type, season = 1, episode = 1) => {
+            const isMovie = type === 'movie';
+            if (isMovie) {
+                return `https://vidsrc.me/embed/movie?tmdb=${id}`;
+            }
+            return `https://vidsrc.me/embed/tv?tmdb=${id}&sea=${season}&epi=${episode}`;
         },
         getUrl: (id, type, season = 1, episode = 1) => {
             const isMovie = type === 'movie';
@@ -96,6 +131,7 @@ export const STREAMING_SERVERS = [
     {
         id: 'vidsrcpro',
         name: 'VidSrc PRO',
+        tag: 'Ultra HD',
         badge: 'Ultra HD',
         description: 'Ultra-low latency streaming cluster with high bitrate playback.',
         capabilities: {
@@ -105,6 +141,13 @@ export const STREAMING_SERVERS = [
             supportsTv: true,
             supportsMovie: true,
             quality: '4K/1080p'
+        },
+        url: (id, type, season = 1, episode = 1) => {
+            const isMovie = type === 'movie';
+            if (isMovie) {
+                return `https://vidsrc.pm/embed/movie/${id}`;
+            }
+            return `https://vidsrc.pm/embed/tv/${id}/${season}/${episode}`;
         },
         getUrl: (id, type, season = 1, episode = 1) => {
             const isMovie = type === 'movie';
@@ -117,6 +160,7 @@ export const STREAMING_SERVERS = [
     {
         id: 'embedsu',
         name: 'Embed.su',
+        tag: 'High Speed',
         badge: 'High Speed',
         description: 'High-speed resilient playback with low buffering.',
         capabilities: {
@@ -126,6 +170,13 @@ export const STREAMING_SERVERS = [
             supportsTv: true,
             supportsMovie: true,
             quality: '1080p'
+        },
+        url: (id, type, season = 1, episode = 1) => {
+            const isMovie = type === 'movie';
+            if (isMovie) {
+                return `https://embed.su/embed/movie/${id}`;
+            }
+            return `https://embed.su/embed/tv/${id}/${season}/${episode}`;
         },
         getUrl: (id, type, season = 1, episode = 1) => {
             const isMovie = type === 'movie';
@@ -138,6 +189,7 @@ export const STREAMING_SERVERS = [
     {
         id: 'superembed',
         name: 'SuperEmbed (Multi-Source)',
+        tag: 'Multi-Source',
         badge: 'Multi-Source',
         description: 'Aggregated multi-provider player with automatic stream failover.',
         capabilities: {
@@ -148,6 +200,13 @@ export const STREAMING_SERVERS = [
             supportsMovie: true,
             quality: '1080p'
         },
+        url: (id, type, season = 1, episode = 1) => {
+            const isMovie = type === 'movie';
+            if (isMovie) {
+                return `https://multiembed.mov/?video_id=${id}&tmdb=1`;
+            }
+            return `https://multiembed.mov/?video_id=${id}&tmdb=1&s=${season}&e=${episode}`;
+        },
         getUrl: (id, type, season = 1, episode = 1) => {
             const isMovie = type === 'movie';
             if (isMovie) {
@@ -157,6 +216,50 @@ export const STREAMING_SERVERS = [
         }
     }
 ];
+
+/**
+ * Normalizes a raw playback server request into a safe, valid source object.
+ * Guarantees a string URL and valid metadata regardless of provider structure.
+ */
+export function normalizePlaybackSource(server, id, type = 'movie', season = 1, episode = 1, lang = 'en') {
+    if (!server) {
+        return {
+            url: `https://vidsrc.me/embed/${type === 'movie' ? 'movie?tmdb=' : 'tv?tmdb='}${id}`,
+            provider: 'VidSrc Fallback',
+            language: lang || 'en',
+            tag: 'Fallback',
+            isValid: true
+        };
+    }
+
+    let resolvedUrl = '';
+    try {
+        if (typeof server.url === 'function') {
+            resolvedUrl = server.url(id, type, season, episode, lang);
+        } else if (typeof server.getUrl === 'function') {
+            resolvedUrl = server.getUrl(id, type, season, episode, lang);
+        } else if (typeof server.url === 'string') {
+            resolvedUrl = server.url;
+        } else if (typeof server.source === 'string') {
+            resolvedUrl = server.source;
+        }
+    } catch (e) {
+        console.warn('Playback source URL resolution error:', e);
+    }
+
+    if (!resolvedUrl || typeof resolvedUrl !== 'string') {
+        resolvedUrl = `https://vidsrc.me/embed/${type === 'movie' ? 'movie?tmdb=' : 'tv?tmdb='}${id}`;
+    }
+
+    return {
+        url: resolvedUrl,
+        provider: server.name || 'Primary Stream',
+        tag: server.tag || server.badge || 'HD Master',
+        language: lang || 'en',
+        capabilities: server.capabilities || { supportsAudioSwitch: false, supportedLanguages: ['en'] },
+        isValid: Boolean(resolvedUrl && resolvedUrl.startsWith('http'))
+    };
+}
 
 /**
  * Standard Language Definition List

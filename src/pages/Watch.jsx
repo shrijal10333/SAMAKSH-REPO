@@ -12,7 +12,8 @@ import { useContinueWatching } from '../hooks/useContinueWatching';
 import { 
     STREAMING_SERVERS, 
     getRealLanguageAvailability, 
-    resolveServerForLanguage 
+    resolveServerForLanguage,
+    normalizePlaybackSource 
 } from '../services/streamingMatrix';
 
 export default function Watch({ explicitType, explicitId, startTime, partyRoom, isHost, username, socket }) {
@@ -284,7 +285,8 @@ export default function Watch({ explicitType, explicitId, startTime, partyRoom, 
         overview: detail.overview || 'Enjoy this episode.' 
     };
 
-    const currentServerUrl = activeServer.url(id, activeMediaType, season, episode, selectedAudioCode) || '';
+    const playbackSource = normalizePlaybackSource(activeServer, id, activeMediaType, season, episode, selectedAudioCode);
+    const currentServerUrl = playbackSource.url;
 
     return (
         <div className="min-h-screen bg-[#080808] text-white overflow-y-auto relative selection:bg-[#ff4d4d] selection:text-white pb-40 custom-scrollbar">
@@ -491,7 +493,7 @@ export default function Watch({ explicitType, explicitId, startTime, partyRoom, 
                                                 Streaming Server Node
                                             </h3>
                                             <p className="text-[10px] text-white/40 font-medium">
-                                                Active Server: <span className="text-white font-bold">{activeServer.name}</span> ({activeServer.tag})
+                                                Active Server: <span className="text-white font-bold">{activeServer.name}</span> ({activeServer.tag || activeServer.badge || 'HD'})
                                             </p>
                                         </div>
                                    </div>
@@ -502,6 +504,8 @@ export default function Watch({ explicitType, explicitId, startTime, partyRoom, 
                               <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
                                    {STREAMING_SERVERS.map((srv, idx) => {
                                        const isCurrent = activeServerIndex === idx;
+                                       const srvTag = srv.tag || srv.badge || 'HD';
+                                       const srvLanguages = srv.capabilities?.supportedLanguages || ['en'];
                                        return (
                                            <button 
                                               key={srv.id}
@@ -509,7 +513,7 @@ export default function Watch({ explicitType, explicitId, startTime, partyRoom, 
                                                   setActiveServerIndex(idx);
                                                   setSwitchNotice({
                                                       type: 'success',
-                                                      message: `Active stream server changed to ${srv.name} (${srv.tag}).`
+                                                      message: `Active stream server changed to ${srv.name} (${srvTag}).`
                                                   });
                                                   setTimeout(() => setSwitchNotice(null), 3000);
                                               }}
@@ -524,11 +528,11 @@ export default function Watch({ explicitType, explicitId, startTime, partyRoom, 
                                                    <span className={`text-[8px] font-black uppercase px-1.5 py-0.5 rounded ${
                                                        isCurrent ? 'bg-black/30 text-white' : 'bg-white/10 text-white/50'
                                                    }`}>
-                                                       {srv.tag}
+                                                       {srvTag}
                                                    </span>
                                                </div>
                                                <span className="text-[11px] font-black uppercase tracking-wider">{srv.name}</span>
-                                               <span className="text-[8px] opacity-60 line-clamp-1">{srv.supportedLanguages.join(', ').toUpperCase()}</span>
+                                               <span className="text-[8px] opacity-60 line-clamp-1">{srvLanguages.join(', ').toUpperCase()}</span>
                                            </button>
                                        );
                                    })}
